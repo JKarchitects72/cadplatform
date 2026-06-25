@@ -1,0 +1,10 @@
+# Runtime dependencies (mirror of pyproject.toml [project.dependencies]).
+ezdxf>=1.3
+opencv-python>=4.9
+shapely>=2.0
+numpy>=1.26
+PyMuPDF>=1.24
+anthropic>=0.40
+
+# Dev / test
+pytest>=8.0
