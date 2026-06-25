@@ -20,6 +20,7 @@ class LayerDef:
     name: str
     color: int          # ACI color index
     lineweight: int     # 1/100 mm, from the valid DXF lineweight set
+    plot: bool = True   # False => non-plotting layer (review/markup only)
     description: str = ""
 
 
@@ -27,6 +28,11 @@ class LayerDef:
 LAYERS: dict[str, LayerDef] = {
     "A-WALL-NEWW": LayerDef("A-WALL-NEWW", color=7, lineweight=50, description="New walls"),
     "A-WALL-EXTR": LayerDef("A-WALL-EXTR", color=5, lineweight=70, description="Exterior walls"),
+    # Non-plotting review layer: walls whose measured thickness is an outlier
+    # (beyond the snap guard) land here at their RAW thickness so the architect
+    # sees them in the DXF but they never silently plot at a wrong thickness.
+    "A-WALL-REVIEW": LayerDef("A-WALL-REVIEW", color=1, lineweight=25, plot=False,
+                              description="Non-standard wall thickness — review"),
     "A-DOOR": LayerDef("A-DOOR", color=3, lineweight=35, description="Doors"),
     "A-FLOR-OVHD": LayerDef("A-FLOR-OVHD", color=8, lineweight=18, description="Overhead / hidden"),
     "I-FURN": LayerDef("I-FURN", color=4, lineweight=25, description="Furniture"),

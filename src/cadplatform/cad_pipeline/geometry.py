@@ -39,12 +39,16 @@ class Segment:
 
 @dataclass
 class Wall:
-    """A wall centerline plus pipeline metadata."""
+    """A wall centerline plus measured/standardized thickness and metadata."""
 
     centerline: Segment
     layer: str = ""
-    # Nominal standardized thickness in mm (None until measured; thickness
-    # measurement from the raster is a DEFERRED stage, see CLAUDE.md rule 4).
+    # Raw measured thickness (perpendicular distance between the paired edges).
+    # Retained for debugging; NEVER serialized for standardized walls.
+    raw_thickness_mm: float | None = None
+    # Standardized thickness actually used for serialization. For non-flagged
+    # walls this is the snapped standard value; for flagged outliers it equals
+    # the raw measurement (we never force-snap, see CLAUDE.md rule 4).
     thickness_mm: float | None = None
     flagged: bool = False
     note: str = ""

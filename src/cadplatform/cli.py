@@ -13,12 +13,16 @@ import sys
 
 from . import config
 from .cad_pipeline.geometry import Segment
-from .cad_pipeline.layers import assign_wall_layer
+from .cad_pipeline.layers import assign_wall_layers
 from .cad_pipeline.orthogonalize import orthogonalize
-from .cad_pipeline.walls import merge_centerlines, to_walls
+from .cad_pipeline.walls import (
+    merge_collinear,
+    pair_parallel_edges,
+    standardize_thickness,
+)
 from .dxf_layer.serialize import build_doc, write_dxf
 from .dxf_layer.validate import validate
-from .image_engine.detect import detect_line_segments
+from .image_engine.detect import detect_wall_edges
 from .image_engine.loader import load_image
 from .image_engine.preprocess import binarize, denoise
 
@@ -40,42 +44,65 @@ def _px_to_mm(segments: list[Segment], scale: float, height_px: int) -> list[Seg
 
 def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
     """Run the wall slice end to end. Returns a summary dict."""
-    # --- image_engine ---
+    standards = config.standard_wall_thicknesses_mm()
+    guard = config.wall_thickness_snap_guard_mm()
+    max_standard = max(standards)
+
+    # --- image_engine: detect wall FACE edges ---
     gray = load_image(input_path)
     binary = denoise(binarize(gray))
-    px_segments = detect_line_segments(binary)
+    px_edges = detect_wall_edges(binary)
 
     # px -> mm (+ y-flip) at the subsystem boundary
-    mm_segments = _px_to_mm(px_segments, scale_mm_per_px, gray.shape[0])
+    mm_edges = _px_to_mm(px_edges, scale_mm_per_px, gray.shape[0])
 
     # --- cad_pipeline (pure geometry) ---
     tol = config.ortho_tolerance_deg()
-    ortho = orthogonalize(mm_segments, tol)
-    # merge tolerances scale with the standard wall set / drawing scale
-    axis_tol = max(config.DEFAULT_WALL_THICKNESSES_MM)  # group fragments within a wall's span
-    gap_tol = axis_tol
-    centerlines = merge_centerlines(ortho, axis_tol_mm=axis_tol, gap_tol_mm=gap_tol)
-    walls = assign_wall_layer(to_walls(centerlines))
+    ortho = orthogonalize(mm_edges, tol)
+
+    # Consolidate collinear fragments (small axis tol so the two faces of one
+    # wall are NOT merged; large gap tol to bridge junction interruptions).
+    edges = merge_collinear(ortho, axis_tol_mm=20.0, gap_tol_mm=2.0 * max_standard)
+
+    # Measure thickness from paired faces, then standardize against the guard.
+    walls = pair_parallel_edges(
+        edges,
+        min_thickness_mm=0.5 * min(standards),
+        max_thickness_mm=2.0 * max_standard,
+        overlap_frac=0.3,
+        min_edge_length_mm=max_standard + guard,  # drop short end-cap edges
+    )
+    standardize_thickness(walls, standards, guard)
+    assign_wall_layers(walls)
 
     # --- dxf_layer ---
     doc = build_doc(walls)
     write_dxf(doc, output_path)
 
-    # mandatory audit (CLAUDE.md rule 7)
-    result = validate(output_path, required_layers={"A-WALL-NEWW": _walls_layer_def()})
+    # mandatory audit + thickness validation (CLAUDE.md rules 4, 6, 7)
+    from .dxf_layer.layer_defs import LAYERS
+    result = validate(
+        output_path,
+        required_layers={
+            "A-WALL-NEWW": LAYERS["A-WALL-NEWW"],
+            "A-WALL-REVIEW": LAYERS["A-WALL-REVIEW"],
+        },
+        check_thickness=True,
+        standards_mm=standards,
+    )
 
+    standard_walls = [w for w in walls if not w.flagged]
+    flagged_walls = [w for w in walls if w.flagged]
     return {
-        "raw_segments": len(px_segments),
+        "raw_edges": len(px_edges),
         "walls": len(walls),
+        "standard_walls": len(standard_walls),
+        "flagged_walls": len(flagged_walls),
+        "wall_objects": walls,
         "audit_errors": result.audit_errors,
         "validation": result,
         "output": output_path,
     }
-
-
-def _walls_layer_def():
-    from .dxf_layer.layer_defs import LAYERS
-    return LAYERS["A-WALL-NEWW"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,8 +123,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "convert":
         summary = convert(args.input, args.output, args.scale)
-        print(f"detected {summary['raw_segments']} raw segments")
-        print(f"merged into {summary['walls']} wall centerlines on A-WALL-NEWW")
+        print(f"detected {summary['raw_edges']} raw edge segments")
+        print(
+            f"paired into {summary['walls']} walls "
+            f"({summary['standard_walls']} standard on A-WALL-NEWW, "
+            f"{summary['flagged_walls']} flagged on A-WALL-REVIEW)"
+        )
+        for w in summary["wall_objects"]:
+            if w.flagged:
+                print(f"  ! {w.note}")
         print(summary["validation"].summary())
         return 0 if summary["validation"].ok else 1
 

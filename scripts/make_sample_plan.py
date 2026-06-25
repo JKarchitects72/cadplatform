@@ -1,7 +1,12 @@
-"""Generate a simple synthetic floor-plan PNG for the first vertical slice.
+"""Generate a synthetic floor-plan PNG with walls of real thickness.
 
-Draws an axis-aligned building outline plus two interior walls as thin black
-centerlines on white. Deterministic; no external input required.
+At 10 mm/px the plan contains:
+  - a 250 mm (25 px) external envelope wall  -> standard
+  - a 100 mm (10 px) interior partition, T-joining the envelope (junction test)
+  - a 350 mm (35 px) outlier wall            -> beyond the snap guard -> flagged
+
+Walls are drawn as FILLED bands so their two faces are real, measurable edges.
+Deterministic; no external input required.
 
 Usage:
     python scripts/make_sample_plan.py [output_path]
@@ -14,23 +19,23 @@ import sys
 import cv2
 import numpy as np
 
-# Image is 800x600 px. At 10 mm/px that is a 8000 x 6000 mm sheet.
 WIDTH, HEIGHT = 800, 600
-THICKNESS = 3
 BLACK = 0
+WHITE = 255
 
 
 def make_plan() -> np.ndarray:
-    img = np.full((HEIGHT, WIDTH), 255, dtype=np.uint8)
+    img = np.full((HEIGHT, WIDTH), WHITE, dtype=np.uint8)
 
-    # Outer building rectangle.
-    cv2.rectangle(img, (80, 80), (720, 520), BLACK, THICKNESS)
+    # External envelope: filled outer rect minus a white inner rect => 25 px ring.
+    cv2.rectangle(img, (60, 60), (740, 540), BLACK, thickness=-1)
+    cv2.rectangle(img, (85, 85), (715, 515), WHITE, thickness=-1)
 
-    # Interior vertical wall.
-    cv2.line(img, (400, 80), (400, 300), BLACK, THICKNESS)
+    # Interior partition, 10 px wide, T-joining the bottom envelope wall.
+    cv2.rectangle(img, (400, 300), (410, 515), BLACK, thickness=-1)
 
-    # Interior horizontal wall.
-    cv2.line(img, (400, 300), (720, 300), BLACK, THICKNESS)
+    # Outlier wall, 35 px tall, standalone in the upper interior.
+    cv2.rectangle(img, (150, 150), (450, 185), BLACK, thickness=-1)
 
     return img
 

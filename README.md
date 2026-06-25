@@ -45,11 +45,18 @@ export ANTHROPIC_API_KEY=sk-...
 cadplatform convert samples/floorplan.png -o output/floorplan.dxf
 ```
 
-## First vertical slice
+## Wall subsystem
 
-`load image → detect straight wall lines (OpenCV) → orthogonalize & snap to 90° →
-merge into wall centerlines → assign A-WALL-NEWW layer → serialize to DXF with
-correct layer color/lineweight → run dxf.audit()`.
+`load image → detect wall FACE edges (Canny + Hough) → orthogonalize & snap to
+90° → consolidate collinear fragments → pair parallel faces & MEASURE thickness →
+standardize thickness against the configurable standard set (flag outliers beyond
+the guard) → serialize each wall as two parallel faces on A-WALL-NEWW (standard)
+or the non-plotting A-WALL-REVIEW (flagged) → run dxf.audit()`.
+
+Thickness is measured from the paired faces *before* any collapse to a
+centerline. Outliers beyond the snap guard are never force-snapped: they land on
+the non-plotting `A-WALL-REVIEW` layer at their raw measured thickness and are
+reported by the validator.
 
 ## Tests
 

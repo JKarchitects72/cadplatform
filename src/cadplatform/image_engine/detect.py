@@ -4,7 +4,7 @@ Returns raw line segments in PIXEL coordinates (image origin: top-left, y down).
 Conversion to millimeters and the y-flip happen in the CLI before handing off to
 ``cad_pipeline``.
 
-SCOPE / CLAUDE.md rule 3: this detector finds STRAIGHT segments only. Curve
+SCOPE / CLAUDE.md rule 3: this detector finds STRAIGHT wall faces only. Curve
 recognition (circles, arcs, ellipses, freeform splines) is a DEFERRED stage; the
 line-only detector here is intentionally INCOMPLETE, not the final design.
 """
@@ -17,15 +17,22 @@ import numpy as np
 from ..cad_pipeline.geometry import Segment
 
 
-def detect_line_segments(
+def detect_wall_edges(
     binary: np.ndarray,
     min_length_px: float = 40.0,
     max_gap_px: float = 10.0,
     threshold: int = 50,
 ) -> list[Segment]:
-    """Probabilistic Hough transform → list of pixel-space segments."""
+    """Detect wall FACE edges as pixel-space segments.
+
+    Canny extracts the boundaries of the (filled) wall strokes, then a
+    probabilistic Hough transform turns those boundaries into straight segments —
+    so a wall of real thickness yields its two parallel faces, which downstream
+    pairing measures the thickness from.
+    """
+    edges = cv2.Canny(binary, 50, 150)
     lines = cv2.HoughLinesP(
-        binary,
+        edges,
         rho=1,
         theta=np.pi / 180.0,
         threshold=threshold,

@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 import ezdxf
 
+from ..cad_pipeline.geometry import Segment
+from ..cad_pipeline.walls import pair_parallel_edges
 from .layer_defs import LAYERS, LayerDef
 
 # Layers ezdxf always creates; entities may legitimately sit on "0".
@@ -30,6 +32,8 @@ class ValidationResult:
     path: str
     audit_errors: int = 0
     problems: list[str] = field(default_factory=list)
+    # Measured thicknesses (mm) of walls reconstructed from the review layer.
+    flagged: list[float] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -38,15 +42,36 @@ class ValidationResult:
     def summary(self) -> str:
         status = "PASS" if self.ok else "FAIL"
         lines = [f"[{status}] {self.path}", f"  audit errors: {self.audit_errors}"]
+        if self.flagged:
+            flagged = ", ".join(f"{t:.0f}mm" for t in self.flagged)
+            lines.append(f"  review (A-WALL-REVIEW): {len(self.flagged)} outlier(s): {flagged}")
         for p in self.problems:
             lines.append(f"  - {p}")
         return "\n".join(lines)
+
+
+def _measure_layer_thicknesses(msp, layer: str) -> list[float]:
+    """Reconstruct wall thicknesses on ``layer`` by re-pairing its face LINEs."""
+    segs = [
+        Segment(float(e.dxf.start.x), float(e.dxf.start.y),
+                float(e.dxf.end.x), float(e.dxf.end.y))
+        for e in msp.query(f"LINE[layer=='{layer}']")
+    ]
+    walls = pair_parallel_edges(
+        segs, min_thickness_mm=1.0, max_thickness_mm=10_000.0, overlap_frac=0.3
+    )
+    return [w.raw_thickness_mm for w in walls if w.raw_thickness_mm is not None]
 
 
 def validate(
     path: str,
     required_layers: dict[str, LayerDef] | None = None,
     allowed_layers: set[str] | None = None,
+    check_thickness: bool = False,
+    standards_mm: tuple[float, ...] | None = None,
+    thickness_tol_mm: float = 1.0,
+    wall_layer: str = "A-WALL-NEWW",
+    review_layer: str = "A-WALL-REVIEW",
 ) -> ValidationResult:
     """Validate the DXF at ``path``.
 
@@ -54,6 +79,12 @@ def validate(
     (defaults to the full AIA table). ``allowed_layers`` bounds where entities
     may live (defaults to the required layers plus the DXF built-ins); any entity
     on another layer is reported as a stray.
+
+    When ``check_thickness`` is set (Rule 4/6), wall thicknesses are reconstructed
+    from the face LINEs and asserted: every wall on ``wall_layer`` must have a
+    non-zero thickness matching a standard value (within ``thickness_tol_mm``);
+    any outlier must instead live on the non-plotting ``review_layer`` and is
+    reported in ``result.flagged``.
     """
     if required_layers is None:
         required_layers = LAYERS
@@ -93,6 +124,32 @@ def validate(
             result.problems.append(
                 f"stray entity {entity.dxftype()} on unexpected layer {layer!r}"
             )
+
+    # 4. Wall thickness (Rule 4/6): standard walls match a standard value;
+    #    outliers live on the non-plotting review layer and are reported.
+    if check_thickness:
+        if standards_mm is None:
+            raise ValueError("check_thickness requires standards_mm")
+
+        for t in _measure_layer_thicknesses(msp, wall_layer):
+            if t <= 0:
+                result.problems.append(f"{wall_layer}: zero-thickness wall")
+                continue
+            nearest = min(standards_mm, key=lambda s: abs(s - t))
+            if abs(nearest - t) > thickness_tol_mm:
+                result.problems.append(
+                    f"{wall_layer}: non-standard thickness {t:.0f}mm "
+                    f"(should be flagged to {review_layer})"
+                )
+
+        result.flagged = _measure_layer_thicknesses(msp, review_layer)
+        for t in result.flagged:
+            if t <= 0:
+                result.problems.append(f"{review_layer}: zero-thickness wall")
+
+        # The review layer, when present, must be non-plotting.
+        if review_layer in doc.layers and doc.layers.get(review_layer).dxf.plot != 0:
+            result.problems.append(f"{review_layer} must be non-plotting (plot flag set)")
 
     return result
 

@@ -1,20 +1,25 @@
 """Layer assignment (CLAUDE.md rule 2).
 
-The pipeline assigns AIA layer *names* to geometry. Appearance (color,
-lineweight, linetype) is NOT set here — it is fixed per layer in
-``dxf_layer/layer_defs.py`` and applied at serialization time as BYLAYER.
+Assigns AIA layer *names* to geometry. Appearance (color, lineweight, linetype,
+plot flag) is NOT set here — it is fixed per layer in ``dxf_layer/layer_defs.py``
+and applied at serialization time as BYLAYER.
 """
 
 from __future__ import annotations
 
 from .geometry import Wall
 
-# First-slice scope: all detected walls are "new walls".
+# Standard new walls, and the non-plotting review layer for thickness outliers.
 WALL_LAYER = "A-WALL-NEWW"
+WALL_REVIEW_LAYER = "A-WALL-REVIEW"
 
 
-def assign_wall_layer(walls: list[Wall], layer: str = WALL_LAYER) -> list[Wall]:
-    """Stamp ``layer`` onto every wall and return the list."""
+def assign_wall_layers(
+    walls: list[Wall],
+    wall_layer: str = WALL_LAYER,
+    review_layer: str = WALL_REVIEW_LAYER,
+) -> list[Wall]:
+    """Route flagged outliers to the review layer; standard walls to the wall layer."""
     for w in walls:
-        w.layer = layer
+        w.layer = review_layer if w.flagged else wall_layer
     return walls
