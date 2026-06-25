@@ -18,6 +18,10 @@ venv/
 output/*.dxf
 output/*.png
 
+# Private real client drawings (confidential JKA work) — NEVER committed.
+# Only synthetic, reproducible samples (e.g. samples/floorplan.png) are tracked.
+tests/fixtures/private/
+
 # OS / editor
 .DS_Store
 .idea/
