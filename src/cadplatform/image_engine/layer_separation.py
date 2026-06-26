@@ -6,7 +6,7 @@ a coarse dash signature are carried as opaque metadata (no meaning attached).
 
 CRITICAL (CLAUDE.md / Milestone 2): this module never maps a specific colour to a
 meaning. It only answers "which strokes look alike". Meaning is decided downstream
-by geometry in ``cad_pipeline/classify.py``. If you ever write ``if hue == X`` to
+by geometry in ``cad_pipeline/decompose.py``. If you ever write ``if hue == X`` to
 mean "wall", that is the anti-pattern — stop.
 
 Output: a list of ``LayerGroup`` (binary mask + opaque metadata). The grayscale
