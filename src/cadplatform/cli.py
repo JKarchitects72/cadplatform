@@ -1,9 +1,12 @@
 """cadplatform CLI — the ONLY place the three subsystems are orchestrated.
 
-First vertical slice:
-    load image -> detect straight wall lines (OpenCV) -> convert to mm (+y-flip)
-    -> orthogonalize & snap to 90 deg -> merge into wall centerlines
-    -> assign A-WALL-NEWW -> serialize to DXF -> run dxf.audit().
+Pipeline:
+    STAGE A (image_engine): separate ink into discovered layer-groups by the
+        drawing's own palette (convention-independent; no colour->meaning).
+    STAGE B (cad_pipeline): classify each group by STRUCTURE (geometry only) as
+        wall / grid / stairs / annotation / furniture / hatch / other.
+    Only WALL (and near-miss WALL_REVIEW) groups proceed into the existing
+        detect -> pair faces -> measure thickness -> standardize -> DXF -> audit.
 """
 
 from __future__ import annotations
@@ -12,8 +15,14 @@ import argparse
 import sys
 
 from . import config
+from .cad_pipeline.classify import (
+    EMITTED,
+    WALL,
+    GroupMeta,
+    classify_group,
+)
 from .cad_pipeline.geometry import Segment
-from .cad_pipeline.layers import assign_wall_layers
+from .cad_pipeline.layers import WALL_REVIEW_LAYER, assign_wall_layers
 from .cad_pipeline.orthogonalize import orthogonalize
 from .cad_pipeline.walls import (
     merge_collinear,
@@ -23,8 +32,9 @@ from .cad_pipeline.walls import (
 from .dxf_layer.serialize import build_doc, write_dxf
 from .dxf_layer.validate import validate
 from .image_engine.detect import detect_wall_edges
-from .image_engine.loader import load_image
-from .image_engine.preprocess import binarize, denoise
+from .image_engine.loader import load_bgr
+from .image_engine.layer_separation import separate_layers
+from .image_engine.preprocess import denoise
 
 
 def _px_to_mm(segments: list[Segment], scale: float, height_px: int) -> list[Segment]:
@@ -42,44 +52,91 @@ def _px_to_mm(segments: list[Segment], scale: float, height_px: int) -> list[Seg
     return out
 
 
-def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
-    """Run the wall slice end to end. Returns a summary dict."""
-    standards = config.standard_wall_thicknesses_mm()
-    guard = config.wall_thickness_snap_guard_mm()
-    max_standard = max(standards)
-
-    # --- image_engine: detect wall FACE edges ---
-    gray = load_image(input_path)
-    binary = denoise(binarize(gray))
-    px_edges = detect_wall_edges(binary)
-
-    # px -> mm (+ y-flip) at the subsystem boundary
-    mm_edges = _px_to_mm(px_edges, scale_mm_per_px, gray.shape[0])
-
-    # --- cad_pipeline (pure geometry) ---
+def _walls_from_edges(mm_edges: list[Segment], standards, guard, max_standard) -> list:
+    """Existing wall pipeline on one group's edges: pair -> measure -> standardize."""
     tol = config.ortho_tolerance_deg()
     ortho = orthogonalize(mm_edges, tol)
-
-    # Consolidate collinear fragments (small axis tol so the two faces of one
-    # wall are NOT merged; large gap tol to bridge junction interruptions).
     edges = merge_collinear(ortho, axis_tol_mm=20.0, gap_tol_mm=2.0 * max_standard)
-
-    # Measure thickness from paired faces, then standardize against the guard.
     walls = pair_parallel_edges(
         edges,
         min_thickness_mm=0.5 * min(standards),
         max_thickness_mm=2.0 * max_standard,
         overlap_frac=0.3,
-        min_edge_length_mm=max_standard + guard,  # drop short end-cap edges
+        min_edge_length_mm=max_standard + guard,
     )
     standardize_thickness(walls, standards, guard)
-    assign_wall_layers(walls)
+    return walls
+
+
+def classify_groups(input_path: str, scale_mm_per_px: float) -> dict:
+    """Stage A + Stage B only (no DXF): separate, detect, classify each group.
+
+    Returns the discovered groups with their classification — used by both
+    ``convert`` and the diagnostic harness (which re-classifies at several scales).
+    """
+    standards = config.standard_wall_thicknesses_mm()
+    guard = config.wall_thickness_snap_guard_mm()
+
+    bgr = load_bgr(input_path)
+    height_px, width_px = bgr.shape[:2]
+    sheet_w_mm = width_px * scale_mm_per_px
+    sheet_h_mm = height_px * scale_mm_per_px
+
+    groups = separate_layers(bgr)  # STAGE A — convention-independent
+    reports = []
+    for g in groups:
+        px_edges = detect_wall_edges(denoise(g.mask))
+        mm_edges = _px_to_mm(px_edges, scale_mm_per_px, height_px)
+        meta = GroupMeta(
+            stroke_width_mm=g.stroke_width_px * scale_mm_per_px,
+            dash_kind=g.dash_kind,
+            ink_fraction=g.ink_fraction,
+        )
+        cls = classify_group(mm_edges, sheet_w_mm, sheet_h_mm, standards, guard, meta)  # STAGE B
+        reports.append({"group": g, "mm_edges": mm_edges, "classification": cls})
+    return {
+        "reports": reports,
+        "image_shape": (height_px, width_px),
+        "sheet_mm": (sheet_w_mm, sheet_h_mm),
+    }
+
+
+def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
+    """Run the full pipeline: Stage A separation -> Stage B classification ->
+    existing wall pipeline (WALL/near-miss groups only) -> DXF -> audit."""
+    standards = config.standard_wall_thicknesses_mm()
+    guard = config.wall_thickness_snap_guard_mm()
+    max_standard = max(standards)
+
+    sep = classify_groups(input_path, scale_mm_per_px)
+
+    all_walls = []
+    group_summaries = []
+    for rep in sep["reports"]:
+        g = rep["group"]
+        cls = rep["classification"]
+        emitted = 0
+        if cls.label in EMITTED:
+            walls = _walls_from_edges(rep["mm_edges"], standards, guard, max_standard)
+            if cls.label == WALL:
+                assign_wall_layers(walls)  # flagged outliers -> review, rest -> NEWW
+            else:  # WALL_REVIEW: whole near-miss group is visible-but-not-plotted
+                for w in walls:
+                    w.layer = WALL_REVIEW_LAYER
+                    w.note = (w.note + "; near-miss wall group").strip("; ")
+            all_walls.extend(walls)
+            emitted = len(walls)
+        group_summaries.append({
+            "group_id": g.group_id, "label": cls.label, "reason": cls.reason,
+            "features": cls.features, "heterogeneous": cls.heterogeneous,
+            "hetero_note": cls.hetero_note, "emitted_walls": emitted,
+            "color_bgr": g.color_bgr, "ink_fraction": g.ink_fraction,
+        })
 
     # --- dxf_layer ---
-    doc = build_doc(walls)
+    doc = build_doc(all_walls)
     write_dxf(doc, output_path)
 
-    # mandatory audit + thickness validation (CLAUDE.md rules 4, 6, 7)
     from .dxf_layer.layer_defs import LAYERS
     result = validate(
         output_path,
@@ -91,14 +148,14 @@ def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
         standards_mm=standards,
     )
 
-    standard_walls = [w for w in walls if not w.flagged]
-    flagged_walls = [w for w in walls if w.flagged]
+    standard_walls = [w for w in all_walls if w.layer == "A-WALL-NEWW"]
+    flagged_walls = [w for w in all_walls if w.layer == WALL_REVIEW_LAYER]
     return {
-        "raw_edges": len(px_edges),
-        "walls": len(walls),
+        "walls": len(all_walls),
         "standard_walls": len(standard_walls),
         "flagged_walls": len(flagged_walls),
-        "wall_objects": walls,
+        "wall_objects": all_walls,
+        "groups": group_summaries,
         "audit_errors": result.audit_errors,
         "validation": result,
         "output": output_path,
@@ -123,15 +180,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "convert":
         summary = convert(args.input, args.output, args.scale)
-        print(f"detected {summary['raw_edges']} raw edge segments")
+        print(f"discovered {len(summary['groups'])} layer-group(s)")
+        for g in summary["groups"]:
+            tag = "" if g["emitted_walls"] else "  (rejected)"
+            print(f"  group {g['group_id']}: {g['label']:11s} {g['reason']}{tag}")
+            if g["heterogeneous"]:
+                print(f"      ! {g['hetero_note']}")
         print(
-            f"paired into {summary['walls']} walls "
-            f"({summary['standard_walls']} standard on A-WALL-NEWW, "
-            f"{summary['flagged_walls']} flagged on A-WALL-REVIEW)"
+            f"emitted {summary['walls']} walls "
+            f"({summary['standard_walls']} on A-WALL-NEWW, "
+            f"{summary['flagged_walls']} on A-WALL-REVIEW)"
         )
-        for w in summary["wall_objects"]:
-            if w.flagged:
-                print(f"  ! {w.note}")
         print(summary["validation"].summary())
         return 0 if summary["validation"].ok else 1
 

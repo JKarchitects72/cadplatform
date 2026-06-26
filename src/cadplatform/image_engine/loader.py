@@ -46,3 +46,32 @@ def _load_pdf_first_page(path: str, dpi: int) -> np.ndarray:
         return buf.reshape(pix.height, pix.width).copy()
     finally:
         doc.close()
+
+
+def load_bgr(path: str, pdf_dpi: int = 200) -> np.ndarray:
+    """Return a 3-channel BGR image (colour preserved for Stage A separation).
+
+    PDFs render their first page at ``pdf_dpi`` in RGB. Rasters load as colour.
+    """
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".pdf":
+        import fitz
+
+        doc = fitz.open(path)
+        try:
+            page = doc.load_page(0)
+            zoom = pdf_dpi / 72.0
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB)
+            buf = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+            return cv2.cvtColor(buf, cv2.COLOR_RGB2BGR).copy()
+        finally:
+            doc.close()
+
+    if ext in _RASTER_EXTS:
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"could not read raster image: {path}")
+        return img
+
+    raise ValueError(f"unsupported input format: {ext!r} ({path})")
