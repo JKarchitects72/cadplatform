@@ -68,6 +68,30 @@ def ortho_tolerance_deg() -> float:
     return float(raw)
 
 
+# --- Vision adjudication (T2.3) ---------------------------------------------
+
+# A group is "ambiguous" (and may be sent to the vision judge) when its dominant
+# evidence share is below TOP1, or its margin over the runner-up is below MARGIN,
+# or it is flagged heterogeneous. Confident groups never call vision.
+DEFAULT_VISION_AMBIGUITY_TOP1 = 0.55
+DEFAULT_VISION_AMBIGUITY_MARGIN = 0.20
+
+
+def vision_ambiguity_top1() -> float:
+    raw = os.environ.get("CADPLATFORM_VISION_AMBIGUITY_TOP1", "").strip()
+    return float(raw) if raw else DEFAULT_VISION_AMBIGUITY_TOP1
+
+
+def vision_ambiguity_margin() -> float:
+    raw = os.environ.get("CADPLATFORM_VISION_AMBIGUITY_MARGIN", "").strip()
+    return float(raw) if raw else DEFAULT_VISION_AMBIGUITY_MARGIN
+
+
+def vision_cache_dir() -> str:
+    return os.environ.get("CADPLATFORM_VISION_CACHE_DIR", "output/.vision_cache").strip() \
+        or "output/.vision_cache"
+
+
 # --- DXF output -------------------------------------------------------------
 
 # DXF is authored in millimeters ($INSUNITS = 4).

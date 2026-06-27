@@ -22,6 +22,7 @@ from .cad_pipeline.geometry import Segment
 from .cad_pipeline.layers import WALL_REVIEW_LAYER
 from .dxf_layer.serialize import build_doc, write_dxf
 from .dxf_layer.validate import validate
+from .image_engine import vision_judge
 from .image_engine.detect import detect_wall_edges
 from .image_engine.layer_separation import separate_layers
 from .image_engine.loader import load_bgr
@@ -39,23 +40,23 @@ def _px_to_mm(segments: list[Segment], scale: float, height_px: int) -> list[Seg
 
 
 def _separate_and_detect(input_path: str, scale: float):
-    """Stage A: BGR -> groups (+segments in mm) + text boxes (mm). Reusable."""
+    """Stage A: BGR -> groups (+segments mm) + text boxes (mm) + masks + image."""
     bgr = load_bgr(input_path)
     h_px, w_px = bgr.shape[:2]
     groups_raw = separate_layers(bgr)
     text_px = detect_text_regions(bgr)
     text_mm = [(x * scale, (h_px - (y + th)) * scale, (x + tw) * scale, (h_px - y) * scale)
                for (x, y, tw, th) in text_px]
-    groups = []
+    groups, masks = [], {}
     for g in groups_raw:
         edges = detect_wall_edges(denoise(g.mask))
         groups.append({
             "group_id": g.group_id,
             "segments": _px_to_mm(edges, scale, h_px),
             "ink_fraction": g.ink_fraction,
-            "color_bgr": g.color_bgr,
         })
-    return groups, text_mm, (h_px, w_px)
+        masks[g.group_id] = g.mask
+    return groups, text_mm, (h_px, w_px), bgr, masks
 
 
 def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
@@ -63,10 +64,24 @@ def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
     standards = config.standard_wall_thicknesses_mm()
     guard = config.wall_thickness_snap_guard_mm()
 
-    groups, text_mm, (h_px, w_px) = _separate_and_detect(input_path, scale_mm_per_px)
+    groups, text_mm, (h_px, w_px), bgr, masks = _separate_and_detect(input_path, scale_mm_per_px)
+
+    # Vision adjudication is injected: cad_pipeline calls this for AMBIGUOUS groups
+    # only and receives a label back — never an image, never a coordinate.
+    vision_records: list[dict] = []
+    cache_dir = config.vision_cache_dir()
+
+    def judge(group_id):
+        verdict, record = vision_judge.adjudicate(bgr, masks[group_id], group_id, cache_dir)
+        vision_records.append(record)
+        return verdict
+
     decomp = decompose(
         groups, text_mm, w_px * scale_mm_per_px, h_px * scale_mm_per_px,
         standards, guard, config.ortho_tolerance_deg(),
+        judge=judge,
+        amb_top1=config.vision_ambiguity_top1(),
+        amb_margin=config.vision_ambiguity_margin(),
     )
     walls = decomp.walls
 
@@ -89,6 +104,12 @@ def convert(input_path: str, output_path: str, scale_mm_per_px: float) -> dict:
         "wall_objects": walls,
         "groups": [vars(r) for r in decomp.group_reports],
         "region_counts": decomp.region_counts,
+        "vision": {
+            "calls": len(vision_records),
+            "cached": sum(1 for r in vision_records if r["cached"]),
+            "fallbacks": sum(1 for r in vision_records if r["fallback"]),
+            "records": vision_records,
+        },
         "audit_errors": result.audit_errors,
         "validation": result,
         "output": output_path,
@@ -111,9 +132,12 @@ def main(argv: list[str] | None = None) -> int:
               f"regions {summary['region_counts']}")
         for g in summary["groups"]:
             emit = "EMIT" if g["label"] == WALL else "reject"
-            print(f"  g{g['group_id']}: {g['label']:11s} [{emit}] {g['reason']}")
+            src = g["source"]
+            print(f"  g{g['group_id']}: {g['label']:11s} [{emit}] ({src}) {g['reason']}")
             if g["heterogeneous"]:
                 print(f"      ! {g['hetero_note']}")
+        v = summary["vision"]
+        print(f"vision: {v['calls']} call(s) ({v['cached']} cached, {v['fallbacks']} fallback)")
         print(f"emitted {summary['walls']} walls "
               f"({summary['standard_walls']} on A-WALL-NEWW, "
               f"{summary['flagged_walls']} on A-WALL-REVIEW)")

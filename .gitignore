@@ -26,3 +26,6 @@ tests/fixtures/private/
 .DS_Store
 .idea/
 .vscode/
+
+# Vision adjudication cache (may derive from private drawings)
+output/.vision_cache/
